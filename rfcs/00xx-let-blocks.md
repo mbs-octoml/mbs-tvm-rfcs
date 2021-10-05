@@ -3,8 +3,7 @@
 - RFC PR: [apache/tvm-rfcs#0000](https://github.com/apache/tvm-rfcs/pull/0000)
 - GitHub Issue: [apache/tvm#0000](https://github.com/apache/tvm/issues/0000)
 
-# Summary
-[summary]: #summary
+## Background
 
 Currently Relay supports:
  - Implicitly shared AST nodes:
@@ -43,6 +42,8 @@ Currently Relay supports:
    ```
      class LetNode { Var var; Expr value; Expr body; }
    ```
+
+## Problems to be solved
 
 We've identified 4 issues with the above:
 1. ML models tend to have extremely deep expression trees:
@@ -83,6 +84,8 @@ We've identified 4 issues with the above:
    (Again we'll leave the design of the driver out of scope and just focus on the 'is pure'
    annotation.)
 
+## Proposal
+
 Our proposal is to replace `LetNode` with a new `LetBlockNode`:
 ```
   class LetBindingNode : public Object {
@@ -112,7 +115,7 @@ Our proposal is to replace `LetNode` with a new `LetBlockNode`:
 
 All passes will need to be changed to use this form atomically. However if the standard
 visitors can be shifted first the remaining changes should not be too onerous. See
-(device_aware_visitors.h)[https://github.com/apache/tvm/blob/37cd9837ff302e4490696ca57a9fbba6404c7046/src/relay/transforms/device_aware_visitors.h#L129]
+[device_aware_visitors.h](https://github.com/apache/tvm/blob/37cd9837ff302e4490696ca57a9fbba6404c7046/src/relay/transforms/device_aware_visitors.h#L129)
 for a possible approach for structuring those visitors (which would subsume most of the code
 in that file.)
 
@@ -125,7 +128,9 @@ Here's how this proposal tackles the 4 issues:
 3. We make let and let-rec distinguishable by the `LetBlockFlavor`.
 4. We make pure and possibly impure bindings distinguishable by the `LetBlockFlavor`.
 
-An (alternative proposal)[https://www.notion.so/octoml/Relax-AST-Design-ca92c5623ad44984baa4f6047d8c239e] is
+## Alternative Proposal
+
+An [alternative proposal](https://www.notion.so/octoml/Relax-AST-Design-ca92c5623ad44984baa4f6047d8c239e) is
 (slightly simplified):
 ```
   // LetNode retained.
@@ -206,6 +211,8 @@ handle function bodies as a special case but for uncertain benefit of
 the invariant.
 
 ----------------------------------------------------------------------
+(original template below here)
+
 
 # Motivation
 [motivation]: #motivation
