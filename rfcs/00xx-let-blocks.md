@@ -165,12 +165,9 @@ However that would look like:
       BindingBlockNode {
         bindings = [%x0=...; %x1=...]
       }
-    body = SeqExprNode {
-      blocks = [
-        BindingBlockNode {
-          bindings = [%y=...]
-        }
-      ]
+    body = LetNode {
+      var = %y
+      value = ...
       body = SeqExprNode {
         blocks = [
           BindingBlockNode {
