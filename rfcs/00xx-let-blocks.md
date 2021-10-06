@@ -86,13 +86,12 @@ We've identified 4 issues with the above:
 
 ## Proposal
 
-Our proposal is to replace `LetNode` with a new `LetBlockNode`:
+Our proposal is to replace `LetNode` with a new `LetBlocksNode`:
 ```
   class LetBindingNode : public Object {
    public:
     Var var;
     Expr value;
-    Span span;
   };
 
   enum LetBlockFlavor {
@@ -109,8 +108,13 @@ Our proposal is to replace `LetNode` with a new `LetBlockNode`:
    public:
     Array<LetBinding> bindings;
     LetBlockFlavor flavor;
-    Expr body;
   };
+
+  class LetBlocksNode : public ExprNode {
+   public:
+    Array<LetBlock> blocks;
+    Expr body;
+  }
 ```
 
 All passes will need to be changed to use this form atomically. However if the standard
@@ -121,35 +125,17 @@ in that file.)
 
 Here's how this proposal tackles the 4 issues:
 1. We include `ToANormalForm` (or a less pedantic version which will leave 'small', non-shared sub-expressions in place) as
-   a standard early pass, after which `LetBlockNode` will be the main node building up function bodies. The standard
-   visitors will work both on `LetBlockNode`s as well as `LetBindingNode`s. There should not be deep chains of `LetBlockNodes`,
-   thus naive recursion should be sufficient on the AST in this form.
+   a standard early pass, after which `LetBlocksNode` will be the main node building up function bodies. The standard
+   visitors will have overrides for `LetBlocksNode`, `LetBlockNodo` and `LetBindingNode`s. In ANF every function can be written
+   as a sequence of let-bindings, with the grouping between `kPure`, `kImpure` and `kLetRec` made explicit by the 'double nesting'
+   of `LetBindingNode`s. The only recursion is now on let-bound values, which in ANF should be Relay constructs (calls, conditionals,,
+   etc) with only atomic sub-expressions.
 2. Implicit sharing is removed under this proposal.
 3. We make let and let-rec distinguishable by the `LetBlockFlavor`.
 4. We make pure and possibly impure bindings distinguishable by the `LetBlockFlavor`.
 
-## Alternative Proposal
 
-An [alternative proposal](https://www.notion.so/octoml/Relax-AST-Design-ca92c5623ad44984baa4f6047d8c239e) is
-(slightly simplified):
-```
-  // LetNode retained.
-  // LetBindingNode added as per above.
-
-  class BindingBlockNode : public Object {
-    Array<LetBinding> bindings;
-  };
-
-  class SeqExprNode : public ExprNode {
-   public:
-    Array<BindingBlock> blocks;
-    Expr body;
-  };
-```
-Under this proposal `BindingBlockNodes` are always considered pure, with
-the traditional `LetNode` always considered impure. The motivation for the
-'double nesting' of bindings is unclear. Perhaps it is trying to compactly represent
-programs such as:
+As an example we may have the ANF expression:
 ```
   let %x0 = ...pure...
   let %x1 = ...pure...
@@ -158,54 +144,58 @@ programs such as:
   let %z1 = ...pure...
   ...result...
 ```
-However that would look like:
+which would be represented as:
 ```
-  SeqExprNode {
+  LetBlocksNode {
     blocks = [
-      BindingBlockNode {
-        bindings = [%x0=...; %x1=...]
+      LetBlockNode {
+        bindings = [%x0=...pure...; %x1=...pure...]
+        flavor = kPure
       }
-    body = LetNode {
-      var = %y
-      value = ...
-      body = SeqExprNode {
-        blocks = [
-          BindingBlockNode {
-            bindings = [%z0=...; %z1=...]
-          }
-        ]
-        body = ...result...
+      LetBlockNode {
+        bindings = [%y=...impure...]
+        flavor = kImpure
+      }
+      LetBlockNode {
+        bindings = [%z0=...pure...; %z1=...pure...]
+        flavor = kPure
       }
     }
+    body = ...result...
   }
 ```
 
-Compare that with the main proposal:
-```
-  LetBlockNode {
-    bindings = [%x0=...; %x1=...]
-    flavor = kPure
-    body =
-      LetBlockNode {
-        bindings = [%y=...]
-        flavor = kImpure
-        body =
-          LetBlockNode {
-            bindings = [%z0=...; %z1=...]
-            flavor = kPure
-            body = ...result...
-          }
-      }
-  }
-```
-which the author finds much more straightforward.
+## Comparison to Relax
 
-The alternative proposal does not address issue 3.
+In the current [Relax AST](https://www.notion.so/octoml/Relax-AST-Design-ca92c5623ad44984baa4f6047d8c239e) we have
+(slightly simplified):
+```
+  // LetNode retained.
+  // LetBindingNode added as per above.
 
-The alternative proposal suggest specializing `FunctionNode` body as
-a `SeqExpr`. The author feels doing so would require most passes to
-handle function bodies as a special case but for uncertain benefit of
-the invariant.
+  // Binding values could be impure.
+  class BindingBlockNode : public Object {
+    Array<LetBinding> bindings;
+  };
+
+  // Binding values are pure.
+  class DataflowBlockNode : BindingBlockNode {
+  };
+
+  class SeqExprNode : public ExprNode {
+   public:
+    Array<BindingBlock> blocks;
+    Expr body;
+  };
+```
+
+Here `BindingBlockNodes` resembles our `LetBlockNode` with flavor `kImpure`, `DataflowBlockNode` resembles `LetBlockNode` with flavor
+`kPure`, and we could pretty easily add another sub-type of `BindingBlockNode` to signal the `kLetRec` flavor. I have a weak preference
+for the enum approach instead of the subtyping approach since it is simpler to extend to the let-rec case and there's no question about
+whether all `BindingBlockNode` subtypes should be overloaded in a visitor. But there's really not much to it and I'm open either way.
+
+The Relax proposal suggest possibly specializing `FunctionNode` body as a `SeqExpr`. Personally I think it's best to leave it as
+`Expr` so that passes (including parsing/import) can use the full language and rerun `ToANormalForm` as required.
 
 ----------------------------------------------------------------------
 (original template below here)
