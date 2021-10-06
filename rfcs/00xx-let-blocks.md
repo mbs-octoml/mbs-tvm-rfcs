@@ -71,7 +71,7 @@ We've identified 4 issues with the above:
 
 3. There's nothing to distinguish the let and let-rec form, requiring pass authors to
    check for the syntactic form of the let-bound expression and whether the let-bound
-   var is free within it. Better would be to distinguish these forms by a bool or enum.
+   var is free within it. Better would be to distinguish these forms by a bool, enum or subtype.
 
 4. Relay is not explicit about which expressions have side-effects vs which are pure.
    Many optimizations are unsound in the presence of side-effects, such as moving the binding-site
@@ -84,9 +84,53 @@ We've identified 4 issues with the above:
    (Again we'll leave the design of the driver out of scope and just focus on the 'is pure'
    annotation.)
 
+## Aside: To double-nest or not
+
+Models are typically control-flow free, and in ANF resemble:
+```
+  let %x0 = ...pure...
+  let %x1 = ...pure...
+  let %y = ...impure...
+  let %z0 = ...pure...
+  let %z1 = ...pure...
+  %z1
+```
+where each of the let-bound values is a primitive call who's arguments are atomic
+(a variable, a constant, etc). As mentioned the current `LetNode` representation incurs
+O(n) recursion over `body` by default (issue 1). By grouping bindings into pure vs impure 'blocks' we
+can reduce some recursion, but the worst case is still O(n) on `body` since pure and impure blocks
+can be arbitrarily interleaved. But by further grouping those blocks into a sequence we can
+limit visitor recursion depth to 2. We'll call this the 'double-nesting' representation.
+
+However, some Relay constructs will break this form (Ie will introduce nested 'let-scopes' in the ANF conversion):
+- `MatchNode`s, which have a scope for each `clause.rhs`.
+- `IfNode`s, which have a scope for `true_branch` and `false_branch`.
+- Local `FunctionNode`s, which obviously have a scope for their `body`.
+
+For example:
+```
+  let %x0 = ...pure...
+  let %x1 = ...pure...
+  let %y = if (%x0) {
+    let %a1 = ...pure...
+    let %a2 = ...pure...
+    %a2
+  } else {
+    let %a3 = ...pure...
+    %a3
+  }
+  let %z0 = ...pure...
+  let %z1 = ...pure...
+  %z1
+```
+Here we can happily avoid visitor recursion on the top-level using blocks of let bindings (hooray!), but
+there's no avoiding recursion into the `if` and it's body, which could be arbitrarily nested (boo!).
+
+The author feels optimizing the representation for double-nesting is not worthwhile.
+
 ## Proposal
 
-Our proposal is to replace `LetNode` with a new `LetBlocksNode`:
+Our proposal is to replace `LetNode` with a new `LetBlockNode`:
 ```
   class LetBindingNode : public Object {
    public:
@@ -108,13 +152,8 @@ Our proposal is to replace `LetNode` with a new `LetBlocksNode`:
    public:
     Array<LetBinding> bindings;
     LetBlockFlavor flavor;
-  };
-
-  class LetBlocksNode : public ExprNode {
-   public:
-    Array<LetBlock> blocks;
     Expr body;
-  }
+  };
 ```
 
 All passes will need to be changed to use this form atomically. However if the standard
@@ -125,15 +164,14 @@ in that file.)
 
 Here's how this proposal tackles the 4 issues:
 1. We include `ToANormalForm` (or a less pedantic version which will leave 'small', non-shared sub-expressions in place) as
-   a standard early pass, after which `LetBlocksNode` will be the main node building up function bodies. The standard
-   visitors will have overrides for `LetBlocksNode`, `LetBlockNodo` and `LetBindingNode`s. In ANF every function can be written
-   as a sequence of let-bindings, with the grouping between `kPure`, `kImpure` and `kLetRec` made explicit by the 'double nesting'
-   of `LetBindingNode`s. The only recursion is now on let-bound values, which in ANF should be Relay constructs (calls, conditionals,,
-   etc) with only atomic sub-expressions.
+   a standard early pass, after which `LetBlockNode` will be the main node building up function bodies. The standard
+   visitors will have overrides for `LetBlockNode` and `LetBindingNode`s. Visitor recursion is still technically unbounded,
+   but only on:
+    - the nesting of the Relay `MatchNode`, `IfNode` and local `FunctionNode`s (which are hoisted out by lambda-lifting early on anyway).
+    - the interleaving of `kPure`, `kImpure` and `kLetRec` blocks.
 2. Implicit sharing is removed under this proposal.
 3. We make let and let-rec distinguishable by the `LetBlockFlavor`.
 4. We make pure and possibly impure bindings distinguishable by the `LetBlockFlavor`.
-
 
 As an example we may have the ANF expression:
 ```
@@ -146,26 +184,22 @@ As an example we may have the ANF expression:
 ```
 which would be represented as:
 ```
-  LetBlocksNode {
-    blocks = [
-      LetBlockNode {
-        bindings = [%x0=...pure...; %x1=...pure...]
-        flavor = kPure
-      }
-      LetBlockNode {
-        bindings = [%y=...impure...]
-        flavor = kImpure
-      }
-      LetBlockNode {
+  LetBlockNode {
+    bindings = [%x0=...pure...; %x1=...pure...]
+    flavor = kPure
+    body = LetBlockNode {
+      bindings = [%y=...impure...]
+      flavor = kImpure
+      body = LetBlockNode {
         bindings = [%z0=...pure...; %z1=...pure...]
         flavor = kPure
+        body = ...result...
       }
     }
-    body = ...result...
   }
 ```
 
-## Comparison to Relax
+## (OctoML only) Comparison to Relax
 
 In the current [Relax AST](https://www.notion.so/octoml/Relax-AST-Design-ca92c5623ad44984baa4f6047d8c239e) we have
 (slightly simplified):
@@ -179,7 +213,7 @@ In the current [Relax AST](https://www.notion.so/octoml/Relax-AST-Design-ca92c56
   };
 
   // Binding values are pure.
-  class DataflowBlockNode : BindingBlockNode {
+  class DataflowBlockNode : public BindingBlockNode {
   };
 
   class SeqExprNode : public ExprNode {
@@ -194,8 +228,20 @@ Here `BindingBlockNodes` resembles our `LetBlockNode` with flavor `kImpure`, `Da
 for the enum approach instead of the subtyping approach since it is simpler to extend to the let-rec case and there's no question about
 whether all `BindingBlockNode` subtypes should be overloaded in a visitor. But there's really not much to it and I'm open either way.
 
-The Relax proposal suggest possibly specializing `FunctionNode` body as a `SeqExpr`. Personally I think it's best to leave it as
+The Relax proposal suggest possibly specializing the `FunctionNode` body as a `SeqExpr`. Personally I think it's best to leave it as
 `Expr` so that passes (including parsing/import) can use the full language and rerun `ToANormalForm` as required.
+
+The Relax proposal follows the 'double-nesting' approach, but as mentioned above I feel this is over-specializing.
+
+Most critically however the Relax proposal supports the `match_shape` binding form:
+```
+  class BindingNode : public Object { }
+  class LetBindingNode : public BindingNode { ... as above... }
+  class MatchShapeBindingNode : public LetBindingNode { ... match shape args ... }
+```
+I'm unsure about whether the interleaving of `match_shape` among other let-binding forms is severe enough to justify
+'double-nesting' support. I'd like to leave the door open to `match_shape` being more like Relay's `MatchNode` than
+a let-binding form. This needs more discussion.
 
 ----------------------------------------------------------------------
 (original template below here)
